@@ -1,0 +1,234 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+```{r}
+library(Seurat)
+library(Matrix)
+
+# Step 1: Load count matrix
+counts <- readMM("//rdp.arc.ucl.ac.uk/ritd-ag-project-rd01b9-mdcfe39/scRNAseqAD/Filtered/matrix.mtx.gz")
+
+# Step 2: Load gene names
+genes <- readLines("//rdp.arc.ucl.ac.uk/ritd-ag-project-rd01b9-mdcfe39/scRNAseqAD/Filtered/features.tsv.gz")
+
+# Step 3: Load barcodes
+barcodes <- read.delim("//rdp.arc.ucl.ac.uk/ritd-ag-project-rd01b9-mdcfe39/scRNAseqAD/Filtered/barcodes.tsv.gz", header = TRUE) 
+
+rownames(counts) <- genes
+colnames(counts) <- barcodes$TAG
+
+
+
+seurat_obj <- CreateSeuratObject(counts = counts)
+```
+
+
+```{r}
+# Match metadata to expression matrix
+metadata <- barcodes
+metadata <- metadata[colnames(counts), ]
+
+# Step 7: Add metadata to Seurat
+seurat_obj <- AddMetaData(seurat_obj, metadata)
+```
+
+
+
+
+```{r}
+seurat_obj <- NormalizeData(seurat_obj, normalization.method = "LogNormalize", scale.factor = 10000)
+seurat_obj <- FindVariableFeatures(seurat_obj, selection.method = "vst", nfeatures = 2000)
+seurat_obj <- ScaleData(seurat_obj)
+seurat_obj <- RunPCA(seurat_obj, features = VariableFeatures(object = seurat_obj))
+ElbowPlot(seurat_obj)
+```
+
+```{r}
+seurat_obj <- FindNeighbors(seurat_obj, dims = 1:20)
+seurat_obj <- FindClusters(seurat_obj, resolution = 0.5)
+```
+
+```{r}
+seurat_obj <- RunUMAP(seurat_obj, dims = 1:20)
+
+# 8. Plot
+DimPlot(seurat_obj, reduction = "umap", group.by = "broad.cell.type")  # Or another metadata column
+```
+
+
+```{r}
+library(ggplot2)
+plot <- DimPlot(seurat_obj, reduction = "umap", label = TRUE, label.size = 4.5) + xlab("UMAP 1") + ylab("UMAP 2") +
+    theme(axis.title = element_text(size = 18), legend.text = element_text(size = 18)) + guides(colour = guide_legend(override.aes = list(size = 10)))
+
+ClinicalPhenotypes$sample_number <- gsub("ROS","",ClinicalPhenotypes$Subject)
+meta3 <- merge(meta, ClinicalPhenotypes, by.x=c("samplenumber"), by.y=c("sample_number"))
+rownames(meta3) <- meta3$barcode2
+
+seurat_obj@meta.data <- meta3
+```
+
+```{r}
+DimPlot(seurat_obj, reduction = "umap", label = TRUE, pt.size = 0.5, split.by = "pathology.group") + NoLegend()
+```
+
+```{r}
+seurat_obj@meta.data$Pathology[seurat_obj@meta.data$pathology.group == "early-pathology"] <- paste("Pathology")
+
+seurat_obj@meta.data$Pathology[seurat_obj@meta.data$pathology.group == "late-pathology"] <- paste("Pathology")
+
+seurat_obj@meta.data$Pathology[seurat_obj@meta.data$pathology.group == "no-pathology"] <- paste("No-Pathology")
+
+DimPlot(seurat_obj, reduction = "umap", label = TRUE, pt.size = 0.5, split.by = "Pathology") + NoLegend()
+```
+
+
+```{r}
+seurat_obj@meta.data$CellType <- Idents(seurat_obj)
+
+seurat_obj@meta.data$celltype_pathology <- paste(seurat_obj@meta.data$CellType, seurat_obj@meta.data$Pathology, sep = "_")
+```
+
+```{r}
+DimPlot(seurat_obj, reduction = "umap", label = TRUE, pt.size = 0.5, split.by = "Pathology") + NoLegend()
+features_OLG <- admeta_GLIA_OLG$gene
+features_OLG <- unique(features_OLG)
+
+features_OPC <- admeta_GLIA_OPC$gene
+features_OPC <- unique(features_OPC)
+
+FeaturePlot(seurat_obj, features = c("HHIP"), split.by = "Pathology")
+
+DotPlot(seurat_obj, features = features_OLG, split.by = "Pathology") + RotatedAxis()
+
+oligo_Idents <- c("OLGs_1_Pathology","OLGs_1_No-Pathology","OLGs_2_Pathology","OLGs_2_No-Pathology","OLGs_3_Pathology","OLGs_3_No-Pathology","OLGs_4_Pathology","OLGs_4_No-Pathology","OPC_Pathology","OPC_No-Pathology")
+oligo_Idents <- as.factor(oligo_Idents)
+
+DotPlot(seurat_obj, features = features_OLG, split.by = "Pathology", idents =oligo_Idents ) + RotatedAxis()
+
+DotPlot(seurat_obj, features = ("GAPDH"), split.by = "Pathology") + RotatedAxis()
+
+VlnPlot(seurat_obj, features = features_OLG, split.by = "Pathology", idents =oligo_Idents )
+
+
+VlnPlot(seurat_obj, features = features_OLG, split.by = "Pathology", idents =oligo_Idents )
+
+VlnPlot(seurat_obj, features = c("ARHGAP23"), split.by = "Pathology", idents = oligo_Idents)
+
+FeaturePlot(seurat_obj, features = c("ARHGAP23"), split.by = "Pathology")
+
+```
+
+```{r Differential expression testing}
+Idents(seurat_obj) <- paste("x")
+seurat_obj$celltype.stim <- paste(seurat_obj$celltype_pathology)
+Idents(seurat_obj) <- "celltype.stim"
+
+
+
+OLG1.de.markers <- FindMarkers(seurat_obj, ident.1 = "OLGs_1_Pathology", ident.2 = "OLGs_1_No-Pathology")
+
+
+OLG2.de.markers <- FindMarkers(seurat_obj, ident.1 = "OLGs_2_Pathology", ident.2 = "OLGs_2_No-Pathology")
+
+
+OLG3.de.markers <- FindMarkers(seurat_obj, ident.1 = "OLGs_3_Pathology", ident.2 = "OLGs_3_No-Pathology")
+
+
+OLG4.de.markers <- FindMarkers(seurat_obj, ident.1 = "OLGs_4_Pathology", ident.2 = "OLGs_4_No-Pathology")
+
+
+OPC.de.markers <- FindMarkers(seurat_obj, ident.1 = "OPC_Pathology", ident.2 = "OPC_No-Pathology")
+
+OLG1.de.markers$gene <- rownames(OLG1.de.markers)
+OLG2.de.markers$gene <- rownames(OLG2.de.markers)
+OLG3.de.markers$gene <- rownames(OLG3.de.markers)
+OLG4.de.markers$gene <- rownames(OLG4.de.markers)
+OPC.de.markers$gene <- rownames(OPC.de.markers)
+
+OLG1_meth_meta <- subset(OLG1.de.markers, gene %in% admeta_GLIA_OLG$gene)
+OLG2_meth_meta <- subset(OLG2.de.markers, gene %in% admeta_GLIA_OLG$gene)
+OLG3_meth_meta <- subset(OLG3.de.markers, gene %in% admeta_GLIA_OLG$gene)
+OLG4_meth_meta <- subset(OLG4.de.markers, gene %in% admeta_GLIA_OLG$gene)
+
+OPC_meth_meta <- subset(OPC.de.markers, gene %in% admeta_GLIA_OPC$gene)
+
+OLG1_meth_meta <- subset(OLG1_meth_meta, p_val < 0.05)
+OLG2_meth_meta <- subset(OLG2_meth_meta, p_val < 0.05)
+OLG3_meth_meta <- subset(OLG3_meth_meta, p_val < 0.05)
+OLG4_meth_meta <- subset(OLG4_meth_meta, p_val < 0.05)
+
+OPC_meth_meta <- subset(OPC_meth_meta, p_val < 0.05)
+
+
+```
+
+
+```{r}
+OLG1_meth_AD1 <- subset(OLG1.de.markers, gene %in% DMPs_gasp_GLIA_OLG$gene)
+OLG2_meth_AD1 <- subset(OLG2.de.markers, gene %in% DMPs_gasp_GLIA_OLG$gene)
+OLG3_meth_AD1 <- subset(OLG3.de.markers, gene %in% DMPs_gasp_GLIA_OLG$gene)
+OLG4_meth_AD1 <- subset(OLG4.de.markers, gene %in% DMPs_gasp_GLIA_OLG$gene)
+
+OPC_meth_AD1 <- subset(OPC.de.markers, gene %in% DMPs_gasp_GLIA_OPC$gene)
+
+OLG1_meth_AD1 <- subset(OLG1_meth_AD1, p_val < 0.05)
+OLG2_meth_AD1 <- subset(OLG2_meth_AD1, p_val < 0.05)
+OLG3_meth_AD1 <- subset(OLG3_meth_AD1, p_val < 0.05)
+OLG4_meth_AD1 <- subset(OLG4_meth_AD1, p_val < 0.05)
+
+OPC_meth_AD1 <- subset(OPC_meth_AD1, p_val < 0.05)
+```
+
+```{r}
+OLG1_meth_seurat_obj <- subset(OLG1.de.markers, gene %in% DMPs_sao_GLIA_OLG$gene)
+OLG2_meth_seurat_obj <- subset(OLG2.de.markers, gene %in% DMPs_sao_GLIA_OLG$gene)
+OLG3_meth_seurat_obj <- subset(OLG3.de.markers, gene %in% DMPs_sao_GLIA_OLG$gene)
+OLG4_meth_seurat_obj <- subset(OLG4.de.markers, gene %in% DMPs_sao_GLIA_OLG$gene)
+
+OPC_meth_seurat_obj <- subset(OPC.de.markers, gene %in% DMPs_sao_GLIA_OPC$gene)
+
+OLG1_meth_seurat_obj <- subset(OLG1_meth_seurat_obj, p_val < 0.05)
+OLG2_meth_seurat_obj <- subset(OLG2_meth_seurat_obj, p_val < 0.05)
+OLG3_meth_seurat_obj <- subset(OLG3_meth_seurat_obj, p_val < 0.05)
+OLG4_meth_seurat_obj <- subset(OLG4_meth_seurat_obj, p_val < 0.05)
+
+OPC_meth_seurat_obj <- subset(OPC_meth_seurat_obj, p_val < 0.05)
+```
+
+
+```{r}
+library(ChAMPdata)
+data("probe.features.epic")
+probe.features$CpG <- rownames(probe.features)
+DMPs_gasp_OLG <- merge(DMPs_gasp_GLIA_OLG, probe.features, by.x=c("Name"), by.y=c("CpG"))
+DMPs_gasp_OPC <- merge(DMPs_gasp_GLIA_OPC, probe.features, by.x=c("Name"), by.y=c("CpG"))
+
+write.csv(DMPs_gasp_OLG, file = "DMPs_gasp_OLG.csv")
+write.csv(DMPs_gasp_OPC, file = "DMPs_gasp_OPC.csv")
+
+write.csv(DMPs_sao_GLIA_OLG, file = "DMPs_sao_OLG.csv")
+write.csv(DMPs_sao_GLIA_OPC, file = "DMPs_sao_OPC.csv")
+
+
+write.csv(admeta_GLIA_OLG[,c(1:3, 16:29)], file = "DMPs_meta_OLG.csv")
+write.csv(admeta_GLIA_OPC[,c(1:3, 16:29)], file = "DMPs_meta_OPC.csv")
+
+bothdatasets_OLG <- intersect(DMPs_gasp_OLG$gene, DMPs_sao_GLIA_OLG$gene)
+bothdatasets_OLG_probe <- intersect(DMPs_gasp_OLG$Name, DMPs_sao_GLIA_OLG$Name)
+
+bothdatasets_OPC <- intersect(DMPs_gasp_OPC$gene, DMPs_sao_GLIA_OPC$gene)
+bothdatasets_OPC_probe <- intersect(DMPs_gasp_OPC$Name, DMPs_sao_GLIA_OPC$Name)
+
+alldatasets_OPC <- intersect(bothdatasets_OPC, admeta_GLIA_OPC$gene)
+
+alldatasets_OLG <- intersect(bothdatasets_OLG, admeta_GLIA_OLG$gene)
+```
+
+```{r}
+comparisons <- as.list(c("OLGs_1_Pathology","OLGs_1_No-Pathology"),c("OLGs_2_Pathology","OLGs_2_No-Pathology"),c("OLGs_3_Pathology","OLGs_3_No-Pathology"),c("OLGs_4_Pathology","OLGs_4_No-Pathology"),c("OPC_Pathology","OPC_No-Pathology"))
+```
+
+
+

@@ -1,0 +1,210 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
+
+Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Ctrl+Shift+Enter*. 
+
+```{r}
+# Step 1: Subset Seurat object to OLG clusters (Oli* subclusters)
+olg_AD <- subset(seurat_obj, idents = grep("^Oli", levels(Idents(seurat_obj)), value = TRUE))
+
+olg_AD <- SetupForWGCNA(
+  olg_AD,
+  gene_select = "fraction", # the gene selection approach
+  fraction = 0.01, # fraction of cells that a gene needs to be expressed in order to be included
+  wgcna_name = "olg_AD" # the name of the hdWGCNA experiment
+)
+
+# Step 2: Generate metacells by group (e.g., Subcluster)
+olg_AD <- MetacellsByGroups(
+  seurat_obj = olg_AD,
+  group.by = "Subcluster",
+  ident.group = "Subcluster",
+  k = 25,
+  max_shared = 10
+)
+
+# Step 4: Normalize the metacells using log-normalization
+olg_AD <- NormalizeMetacells(
+  seurat_obj = olg_AD,
+  wgcna_name = "olg_AD",
+  assay = "RNA",
+  layer = "counts"
+)
+
+olg_AD <- SetDatExpr(
+  seurat_obj = olg_AD,
+  group.by = "Subcluster",
+  group_name = levels(Idents(olg_AD@misc$olg_AD$wgcna_metacell_obj)),
+  assay = "RNA",
+  layer = "data"
+)
+
+# Step 6: Choose soft-thresholding power
+#olg_AD <- TestSoftPowers(
+  seurat_obj = olg_AD,
+  wgcna_name = "olg_AD"
+)
+
+
+```
+```{r}
+olg_AD <- ConstructNetwork(
+  seurat_obj = olg_AD,
+  soft_power = 8,
+  tom_name = "Attempt1",
+  overwrite_tom = TRUE,
+  wgcna_name = "olg_AD",
+  networkType = "signed",
+  minModuleSize =30,
+  mergeCutHeight = 0.1
+)
+
+```
+```{r}
+save(olg_AD, file = "WGCNArunolg_AD.RData")
+```
+
+
+```{r}
+olg_AD <- ModuleEigengenes(olg_AD, wgcna_name = "olg_AD")
+modules <- GetModules(
+  seurat_obj = olg_AD,
+  wgcna_name = "olg_AD",
+  return_kME = TRUE  # ← this is the key argument
+)
+
+library(WGCNA)
+
+# Step 1: Get the expression matrix used in WGCNA
+datExpr <- t(GetDatExpr(olg_AD, wgcna_name = "olg_AD"))  # genes as columns
+
+# Step 2: Get module eigengenes (ME values per cell)
+MEs <- GetMEs(olg_AD, wgcna_name = "olg_AD")  # cells as rows
+
+# Step 3: Compute module membership (kME)
+kme_matrix <- signedKME(datExpr, MEs)  # returns a matrix: genes x modules
+
+# Step 4: Format into a data frame
+kme_df <- data.frame(
+  gene_name = colnames(datExpr),
+  kme_matrix,
+  check.names = FALSE
+)
+
+
+modules <- GetModules(olg_AD, wgcna_name = "olg_AD")
+olg_AD <- GetModuleScores(
+  seurat_obj = olg_AD,
+  wgcna_name = "olg_AD"
+)
+```
+
+
+```{r}
+PlotDendrogram(olg_AD, main='OLG hdWGCNA Dendrogram')
+
+olg_AD <- ModuleEigengenes(
+ olg_AD,
+ group.by.vars="sample"
+)
+
+hMEs <- GetMEs(olg_AD)
+
+olg_AD <- ModuleConnectivity(
+  olg_AD,
+  group.by = 'Subcluster', group_name = 'Oli'
+)
+
+olg_AD <- ResetModuleNames(
+  olg_AD,
+  new_name = "OLG-M"
+)
+```
+
+```{r}
+# get the module assignment table:
+modules <- GetModules(olg_AD) %>% subset(module != 'grey')
+
+# show the first 6 columns:
+head(modules[,1:6])
+
+# get hub genes
+hub_df <- GetHubGenes(olg_AD, n_hubs = 10)
+
+head(hub_df)
+
+# compute gene scoring for the top 25 hub genes by kME for each module
+# with UCell method
+library(UCell)
+olg_AD <- ModuleExprScore(
+  olg_AD,
+  n_genes = 25,
+  method='UCell'
+)
+```
+
+```{r}
+# Step 1: Get module assignments
+modules_df <- GetModules(olg_AD, wgcna_name = "olg_AD")
+
+# This returns a dataframe like: gene_name | module | color
+
+# Step 2: Create a named vector of colors
+module_colors <- modules_df$color
+names(module_colors) <- modules_df$gene_name
+
+# Step 3: Save module colors into the correct slot
+olg_AD@misc$olg_AD$module_colors <- module_colors
+
+# Retrieve metacell expression matrix
+datExpr <- GetDatExpr(olg_AD, wgcna_name = "olg_AD")
+
+# Get aligned module eigengenes using base WGCNA
+MEs <- moduleEigengenes(datExpr, colors = module_colors)$eigengenes
+
+# Calculate kME (module membership)
+kME_mat <- cor(datExpr, MEs, use = "p")
+
+# Optional: make it a tidy dataframe
+kME_df <- as.data.frame(kME_mat)
+kME_df$gene_name <- rownames(kME_df)
+
+```
+
+```{r ModuleTraitCorrelations}
+
+
+# Get the metacell object
+metacell_obj <- metadata
+
+# Extract metadata
+traits_df <- metacell_obj
+
+# Check available traits
+colnames(traits_df)
+
+# Let's focus on Subcluster and AD pathology
+selected_traits <- traits_df[, c("Subcluster", "cogdx", "braaksc", "amyloid", "pathology.group")]
+
+# Convert categorical traits to numeric where needed
+selected_traits$Subcluster <- as.factor(selected_traits$Subcluster)
+selected_traits$pathology.group <- as.factor(selected_traits$pathology.group)
+
+# Model matrix (dummy variables for factors)
+traits_mat <- model.matrix(~ ., data = selected_traits)[, -1]  # remove intercept
+rownames(traits_mat) <- rownames(selected_traits)
+
+# Run the correlation
+olg_AD <- ModuleTraitCorrelation(
+  seurat_obj = olg_AD,
+  traits = traits_mat,
+  wgcna_name = "olg_AD"
+)
+
+
+```
+
