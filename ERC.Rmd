@@ -1,0 +1,1008 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+---
+title: "ERC"
+output: html_notebook
+---
+```{r}
+library(knitr)
+library(limma)
+library(minfi)
+library(IlluminaHumanMethylation450kanno.ilmn12.hg19)
+library(IlluminaHumanMethylation450kmanifest)
+
+# Epic manifest if applicable 
+library(RColorBrewer)
+library(missMethyl)
+library(Gviz)
+library(DMRcate)
+library(stringr)
+library(lumi)
+library(sva)
+library(ChAMP)
+library(data.table)
+library(dplyr)
+library(textshape)
+library("ggsci")
+library("ggplot2")
+library("gridExtra")
+library(ggrepel)
+library(readxl)
+```
+
+
+```{r}
+targets0 = myLoad$pd
+names(targets0)[1] <- paste("Sample_Name")
+
+CellProp <- as.data.frame(CellProp)
+CellProp$Basenames <- rownames(CellProp)
+targets <- merge(targets0, CellProp, by.x=c("Basenames"), by.y=c("Basenames"))
+
+ERC_samples <- subset(targets, Region =="ERC")
+rownames(ERC_samples) <- ERC_samples$Sample_Name.x
+names(ERC_samples)[2] <- paste("Sample_Name")
+ERC_samplenames <- ERC_samples$Sample_Name
+
+myNorm_ERC <- myNorm[,ERC_samplenames]
+dim(myNorm_ERC)
+```
+
+```{r}
+M_matrix_ERC <- beta2m(myNorm_ERC)
+```
+
+```{r}
+ERC_samples$Slide <- as.character(ERC_samples$Slide)
+ERC_samples$Plate <- as.factor(ERC_samples$Plate)
+
+```
+
+```{r}
+champ.SVD(beta=as.data.frame(myNorm_ERC), pd = ERC_samples)
+```
+
+```{r}
+champ.SVD(beta=as.data.frame(M_matrix_ERC), pd = ERC_samples)
+```
+
+```{r Removing age associated probes}
+ERC_samples <- ERC_samples %>% mutate(Plate = str_replace_all(Plate, " ", "_"))
+ERC_samples0 <- ERC_samples[,-c(1,3,14,15,16)]
+ERC_samples <- ERC_samples0
+Sample_group <- factor(ERC_samples$Sample_Group, levels=c("Control","Alzheimer"))
+
+age <- as.numeric(ERC_samples$Age)
+
+design_ERCage <- model.matrix(~age, data=ERC_samples)
+dim(design_ERCage)
+
+fit_ERCage = lmFit(M_matrix_ERC,design_ERCage)
+
+contMatrix_age <-  makeContrasts("age", levels = design_ERCage)
+
+fit2_age <- contrasts.fit(fit_ERCage, contMatrix_age)
+fit3_age <- eBayes(fit2_age)
+
+summary(decideTests(fit3_age, adjust.method = "fdr", p.value = 0.01))
+
+####DMPs ###
+data(probe.features.epic)
+probe.genes<-subset(probe.features, probe.features$feature!="IGR")
+dim(probe.genes)
+load("Z:/Sao_for_Preservation/PSPnetworks/annot.RData")
+annSub <- annot[match(rownames(M_matrix_ERC),rownames(probe.genes)),]
+
+DMPs_age <- topTable(fit3_age,  num=Inf, coef=1, genelist=annSub)
+
+
+ageProbes <- subset(DMPs_age, P.Value < 0.2)
+age_probes <- ageProbes$Probe
+
+
+#Removing the age associated probes 
+M_matrix_ERC_t <- as.data.frame(t(M_matrix_ERC))
+M_matrix_ERC_t = M_matrix_ERC_t[, !names(M_matrix_ERC_t) %in% age_probes]
+
+M_matrix_ERC_age <- as.matrix(t(M_matrix_ERC_t))
+
+
+
+```
+
+```{r}
+champ.SVD(beta=as.data.frame(M_matrix_ERC_age), pd = ERC_samples)
+```
+
+```{r}
+Sample_group <- as.factor(ERC_samples$Sample_Group)
+
+#factors to take into account
+
+Sample_group <- as.factor(ERC_samples$Sample_Group)
+sex <- factor(ERC_samples$Sex)
+age <- as.numeric(ERC_samples$Age)
+array <- factor(ERC_samples$Array)
+slide <- as.factor(ERC_samples$Slide)
+plate <- as.factor(ERC_samples$Plate)
+DoubleN <- as.numeric(ERC_samples$DoubleN)
+NeuNP <- as.numeric(ERC_samples$NeuNP)
+Sox10P <- as.numeric(ERC_samples$Sox10P)
+agesq <- as.numeric((ERC_samples$Age)^2)
+#Design Matrix 
+
+design_ERC <- model.matrix(~0+Sample_group+slide+DoubleN+Sox10P+age+agesq, data=ERC_samples0)
+dim(design_ERC)
+
+
+
+#SVA 
+design0 <-  model.matrix(~0+slide+DoubleN+Sox10P+age+agesq, data=ERC_samples0)
+n.sv = num.sv(M_matrix_ERC_age, design_ERC, method="leek") ##returns 2 Surrogate Variables 
+n.sv
+svobj <- sva(M_matrix_ERC_age, design_ERC, design0, n.sv=n.sv)
+
+designSv <- cbind(design_ERC, svobj$sv)
+
+#Fit 
+
+fit = lmFit(M_matrix_ERC_age, design_ERC)
+
+contMatrix <- makeContrasts(Sample_groupAlzheimer-Sample_groupControl, levels = design_ERC)
+
+```
+
+```{r}
+#Fit 
+
+#fit_ERC = lmFit(M_matrix_ERC, design_ERC)
+
+
+#contMatrix_ERC <- makeContrasts("Sample_groupAlzheimer-Sample_groupControl", levels = design_ERC)
+
+#Checking the fit with SVD 
+
+mAdj.fit_ERC    <- fit$coefficients[,-c(1:2)]
+
+mAdj_ERC        <- as.matrix(M_matrix_ERC_age) - mAdj.fit_ERC %*% t(design_ERC[,-c(1:2)])
+
+bAdj_ERC <- m2beta(mAdj_ERC)
+
+
+rownames(ERC_samples0) <- ERC_samples0$Sample_Name
+
+
+```
+
+```{r}
+champ.SVD(beta=as.data.frame(bAdj_ERC) , pd =ERC_samples0)
+```
+
+```{r}
+champ.SVD(beta=as.data.frame(mAdj_ERC) , pd =ERC_samples0)
+```
+
+
+```{r}
+fit2_ERC <- contrasts.fit(fit, contMatrix)
+fit3_ERC <- eBayes(fit2_ERC)
+
+summary(decideTests(fit3_ERC, adjust.method = "fdr", p.value = 0.05))
+```
+
+
+```{r}
+
+ann450k <- getAnnotation(IlluminaHumanMethylation450kanno.ilmn12.hg19)
+
+ann450kSub_ERC <- ann450k[match(rownames(M_matrix_ERC),ann450k$Name),
+                      c(1:4,12:19,24:ncol(ann450k))]
+
+DMPs_ERC <- topTable(fit3_ERC, num=Inf, coef=1, genelist=ann450kSub_ERC)
+```
+
+
+```{r}
+####WCGNA with my data 
+library(WGCNA)
+library(data.table)
+library(dplyr)
+library(textshape)
+library(CoExpNets)
+library(tidyr)
+library(naniar)
+library(IlluminaHumanMethylation450kanno.ilmn12.hg19)
+library(IlluminaHumanMethylation450kmanifest)
+options(stringsAsFactors = FALSE)
+```
+
+```{r}
+
+gene_table <- DMPs_ERC[,c(4,13)]
+
+gene_table  <- gene_table  %>% mutate_all(na_if,"")
+gene_table2  <- na.omit(gene_table )
+
+
+cpgs_list  <- gene_table2$Name
+
+adjusted_matrix  <- as.data.frame(mAdj_ERC)
+
+adjusted_matrix$cpg <- rownames(adjusted_matrix )
+adjusted_matrix2  <- subset(adjusted_matrix , cpg%in%cpgs_list )
+
+
+adjusted_matrix3  <- adjusted_matrix2 [,1:69]
+```
+
+```{r}
+
+data  <- as.data.frame(adjusted_matrix3 )
+dim(data )
+```
+
+```{r}
+data $v <- apply(data , 1, var)
+
+dim(data )
+```
+
+```{r}
+
+data2  <- data [data $v >= quantile(data $v, c(.90)), ] #10% most variable probes
+data3  <- data [data $v >= quantile(data $v, c(.80)), ] 
+```
+
+```{r}
+
+datExpr0  = as.data.frame(t(data3 [,-70])); #remove variance column
+
+datExpr0 [,1:4]
+datExpr  <- as.matrix(datExpr0 )
+dim(datExpr )
+```
+
+```{r Trait Matrix Creation}
+
+#creating trait matrix from targets (used in linear regression)
+datTrait1 <- as.data.frame(ERC_samples)
+datTrait4 <-datTrait1
+#making disease status etc numeric 
+datTrait4$Sample_Groupn <- paste("Null")
+for(i in 1:nrow(datTrait4)){
+  print(i)
+  if(datTrait4$Sample_Group[i] == "Control"){
+    datTrait4$Sample_Groupn[i] <- paste("0")
+  }
+  else if(datTrait4$Sample_Group[i] == "Alzheimer"){
+    datTrait4$Sample_Groupn[i] <- paste("1")
+  }
+}
+datTrait4$Sexn <- paste("Null")
+for(i in 1:nrow(datTrait4)){
+  print(i)
+  if(datTrait4$Sex[i] == "F"){
+    datTrait4$Sexn[i] <- paste("0")
+  }
+  else if(datTrait4$Sex[i] == "M"){
+    datTrait4$Sexn[i] <- paste("1")
+  }
+}
+datTrait5 <- datTrait4[,-c(56)]
+setnames(datTrait5, old = c("Sample_Groupn","Sexn"), new=c("Sample_Group","Sex"))
+```
+
+
+```{r}
+gsg = goodSamplesGenes(datExpr, verbose = 3);
+gsg$allOK #if returns true then all good to proceed (skip next step)
+```
+
+
+Load the WGCNA and other packages
+```{r}
+library(WGCNA)
+```
+
+The following setting is important, do not omit!
+```{r}
+options(stringsAsFactors = FALSE)
+```
+
+
+```{r}
+sampleTree = hclust(dist(datExpr), method = "average");
+# Plot the sample tree: Open a graphic output window of size 12 by 9 inches
+# The user should change the dimensions if the window is too large or too small.
+sizeGrWindow(12,9)
+#pdf(file = "Plots/sampleClustering.pdf", width = 12, height = 9);
+par(cex = 0.6);
+par(mar = c(0,4,2,0))
+plot(sampleTree, main = "Sample clustering to detect outliers", sub="", xlab="", cex.lab = 1.5, 
+     cex.axis = 1.5, cex.main = 2)
+
+#if outlier are detected
+#Plot a line to show the cut
+abline(h = 270, col = "red");
+
+```
+
+=====================================================================================
+if outlier samples are detected
+Determine cluster under the line
+```{r}
+clust = cutreeStatic(sampleTree, cutHeight = 260, minSize = 10)
+table(clust)
+```
+
+clust 1 contains the samples we want to keep.
+```{r}
+keepSamples = (clust==1)
+datExpr = datExpr[keepSamples, ]# no samples excluded
+dim(datExpr)
+```
+
+```{r}
+datTraits <- datTrait5
+Samples = rownames(datExpr);
+datTraits$Sample_Name <- rownames(datTraits)
+traitRows = match(Samples, datTraits$Sample_Name);
+datTraits = datTraits[traitRows, ];
+
+datTraits0 <- datTraits[,c(2,9,10,11,12,13)]
+datTraits0$Age <- as.numeric(datTraits0$Age)
+datTraits0$DoubleN <- as.numeric(datTraits0$NeuNP)
+datTraits0$Sox10P <- as.numeric(datTraits0$Sox10P)
+datTraits0$NeuNP <- as.numeric(datTraits0$NeuNP)
+datTraits0$Sample_Group <- as.numeric(datTraits0$Sample_Group)
+datTraits0$Sex <- as.numeric(datTraits0$Sex)
+#Re-cluster samples
+sampleTree2 = hclust(dist(datExpr), method = "average")
+# Convert traits to a color representation: white means low, red means high, grey means missing entry
+traitColors = numbers2colors(datTraits0, signed = FALSE);
+# Plot the sample dendrogram and the colors underneath.
+plotDendroAndColors(sampleTree2, traitColors,
+                    groupLabels = names(datTraits0), 
+                    main = "Sample dendrogram and trait heatmap")
+```
+
+
+# Choose a set of soft-thresholding powers
+```{r}
+powers = c(c(1:10), seq(from = 12, to=20, by=2))#as per tutorial
+#for signed networks acceptable to go up to max power of 30, max 15 for unsigned 
+#powers = c(c(1:10), seq(from = 12, to=30, by=2))
+
+# Call the network topology analysis function
+#sft = pickSoftThreshold(datExpr, powerVector = powers, networkType = "signed", verbose = 5)
+# sft = pickSoftThreshold(datExpr, powerVector = powers, verbose = 5, 
+#       networkType ="signed hybrid", corFnc= "bicor", corOptions=list(maxPOutliers=0.05)) #change for bicor
+
+sft = pickSoftThreshold(datExpr, powerVector = powers, verbose = 5, 
+                        networkType ="signed") #if changing for bicor, 
+#always use maxPOutliers=0.05 or 0.10 whenever the biweight midcorrelation is used
+#https://horvath.genetics.ucla.edu/html/CoexpressionNetwork/Rpackages/WGCNA/faq.html
+
+# Plot the results:
+sizeGrWindow(9, 5)
+par(mfrow = c(1,2));
+cex1 = 0.9;
+# Scale-free topology fit index as a function of the soft-thresholding power
+plot(sft$fitIndices[,1], -sign(sft$fitIndices[,3])*sft$fitIndices[,2],
+     xlab="Soft Threshold (power)",ylab="Scale Free Topology Model Fit,signed R^2",type="n",
+     main = paste("Scale independence"));
+text(sft$fitIndices[,1], -sign(sft$fitIndices[,3])*sft$fitIndices[,2],
+     labels=powers,cex=cex1,col="red");
+# this line corresponds to using an R^2 cut-off of h
+abline(h=0.80,col="red")
+
+# Mean connectivity as a function of the soft-thresholding power
+plot(sft$fitIndices[,1], sft$fitIndices[,5],
+     xlab="Soft Threshold (power)",ylab="Mean Connectivity", type="n",
+     main = paste("Mean connectivity"))
+text(sft$fitIndices[,1], sft$fitIndices[,5], labels=powers, cex=cex1,col="red")
+
+```
+
+```{r}
+bwnet = blockwiseModules(datExpr, maxBlockSize = 20000,
+                         power = 12, networkType = "signed", minModuleSize = 200,
+                         deepSplit = 2,#change from 2 to 4 to detect modules that are less distinct
+                         reassignThreshold = 1e-6, mergeCutHeight = 0.25,
+                         numericLabels = TRUE,
+                         corType = "pearson",
+                         maxPOutliers = 1,
+                         saveTOMs = TRUE,
+                         saveTOMFileBase = "TOM-blockwise",
+                         verbose = 5, loadTOM = TRUE)
+
+```
+
+
+```{r}
+bwnet$colors #modules
+bwnet$MEs #module eigengenes of the modules
+#head(bwnet)
+```
+
+
+```{r}
+table(bwnet$colors)
+# Convert labels to colors for plotting
+bwModuleColors = labels2colors(bwnet$colors)
+table(bwModuleColors)
+# open a graphics window
+sizeGrWindow(6,6)
+# Plot the dendrogram and the module colors underneath for block 1
+plotDendroAndColors(bwnet$dendrograms[[1]], bwModuleColors[bwnet$blockGenes[[1]]],
+                    "Module colors", main = "Gene dendrogram and module colors in block 1",
+                    dendroLabels = FALSE, hang = 0.03,
+                    addGuide = TRUE, guideHang = 0.05)
+# Plot the dendrogram and the module colors underneath for block 2
+plotDendroAndColors(bwnet$dendrograms[[2]], bwModuleColors[bwnet$blockGenes[[2]]],
+                    "Module colors", main = "Gene dendrogram and module colors in block 2",
+                    dendroLabels = FALSE, hang = 0.03,
+                    addGuide = TRUE, guideHang = 0.05)
+# Plot the dendrogram and the module colors underneath for block 3
+plotDendroAndColors(bwnet$dendrograms[[3]], bwModuleColors[bwnet$blockGenes[[3]]],
+                    "Module colors", main = "Gene dendrogram and module colors in block 3",
+                    dendroLabels = FALSE, hang = 0.03,
+                    addGuide = TRUE, guideHang = 0.05)
+
+```
+
+
+#=====================================================================================
+
+```{r}
+moduleLabels = bwnet$colors
+moduleColors = labels2colors(bwnet$colors)
+MEs = bwnet$MEs;
+geneTree = bwnet$dendrograms;
+save(MEs, moduleLabels, moduleColors, geneTree, 
+     file = "networkConstruction-auto.RData")
+```
+
+
+#=====================================================================================
+
+#Quantifying module-trait associations
+
+```{r}
+# Define numbers of genes and samples
+nGenes = ncol(datExpr);
+nSamples = nrow(datExpr);
+
+# Recalculate MEs with color labels
+MEs0 = moduleEigengenes(datExpr, moduleColors)$eigengenes
+MEs = orderMEs(MEs0)
+moduleTraitCor = cor(MEs, datTraits, use = "p");
+moduleTraitPvalue = corPvalueStudent(moduleTraitCor, nSamples);
+```
+
+
+We color code each association by the correlation value:
+```{r}
+sizeGrWindow(10,6)
+# Will display correlations and their p-values
+textMatrix = paste(signif(moduleTraitCor, 2), "\n(",
+                   signif(moduleTraitPvalue, 1), ")", sep = "");
+dim(textMatrix) = dim(moduleTraitCor)
+par(mar = c(6, 10, 3, 3));
+# Display the correlation values within a heatmap plot
+labeledHeatmap(Matrix = moduleTraitCor,
+               xLabels = names(datTraits),
+               yLabels = names(MEs),
+               ySymbols = names(MEs),
+               colorLabels = FALSE,
+               colors = blueWhiteRed(50),
+               textMatrix = textMatrix,
+               setStdMargins = FALSE,
+               cex.text = 0.2,
+               cex.lab = 0.5,
+               zlim = c(-1,1),
+               main = paste("Module-trait relationships"))
+```
+
+#######################################################################
+#Juan's package
+#######################################################################
+```{r}
+library(CoExpNets)
+```
+
+```{r}
+#first run normal wgcna
+bwnet$moduleColors = bwnet$colors
+
+#then apply
+
+NetK <- applyKMeans("FTCX", bwnet, datExpr, n.iterations = 20, debug = F,
+                    n.debug = 500, net.type = "signed", min.exchanged.genes = 20,
+                    excludeGrey = F)
+```
+
+
+
+#Quantifying module-trait associations
+
+```{r}
+# Define numbers of genes and samples
+nGenes = ncol(datExpr);
+nSamples = nrow(datExpr);
+
+
+MEsK = orderMEs(NetK$MEs)
+moduleTraitCorK = cor(MEsK, datTraits, use = "p");
+moduleTraitPvalueK = corPvalueStudent(moduleTraitCorK, nSamples);
+```
+
+
+
+```{r}
+#We color code each association by the correlation value:
+sizeGrWindow(10,6)
+# Will display correlations and their p-values
+textMatrixK = paste(signif(moduleTraitCorK, 2), "\n(",
+                    signif(moduleTraitPvalueK, 1), ")", sep = "");
+dim(textMatrixK) = dim(moduleTraitCorK)
+par(mar = c(6, 11, 3, 3));
+# Display the correlation values within a heatmap plot
+datTraits0 <- as.data.frame(datTraits0)
+labeledHeatmap(Matrix = moduleTraitCorK,
+               xLabels = names(datTraits0),
+               yLabels = names(MEsK),
+               ySymbols = names(MEsK),
+               colorLabels = FALSE,
+               colors = blueWhiteRed(50),
+               textMatrix = textMatrixK,
+               setStdMargins = TRUE,
+               cex.text = 0.5,
+               cex.lab = 0.6,
+               zlim = c(-1,1),
+               main = paste("Module-trait relationships (k-means)"))
+```
+
+
+
+
+
+
+```{r MEs and plotting trait matrix relationships }
+netcolors <- NetK$moduleColors
+table(netcolors)
+#Creating MEs
+
+MEs = NetK$MEs;
+
+#3 Relating modules to external clinical traits
+
+
+
+#3.a Quantifying module–trait associations
+
+
+
+nProbes = ncol(datExpr)
+nSamples = nrow(datExpr)
+
+MEs0 = moduleEigengenes(datExpr , netcolors)$eigengenes
+MEs = orderMEs(MEs0)
+
+
+# Will display correlations and their p-values
+textMatrix = paste(signif(moduleTraitCor, 2), "\n(",
+                   signif(moduleTraitPvalue, 1), ")", sep = "");
+dim(textMatrix) = dim(moduleTraitCor)
+par(mar = c(6, 8.5, 3, 3));
+
+
+
+# Display the correlation values within a heatmap plot
+
+
+# Isolate sample_group from the clinical traits
+datTraits0 <- as.data.frame(datTraits0)
+sample_group = as.data.frame(datTraits0$Sample_Group)
+datTraits0 <- as.matrix(datTraits0)
+names(sample_group) = "Sample_Group"
+MET = orderMEs(cbind(MEs, sample_group))
+sizeGrWindow(6,6);
+par(cex = 1.0)
+plotEigengeneNetworks(MET, "Eigengene dendrogram", marDendro = c(0,4,2,0),
+                      plotHeatmaps = FALSE)
+
+```
+
+
+```{r plotting of gene sig. vs. mm AND creation of geneinfo spreadsheet}
+
+#Gene relationship to trait and important modules: Gene Significance and Module Membership
+# Define variable sample_group containing the sample_group column of datTrait
+
+names(sample_group) = "sample_group"
+
+modNames = substring(names(MEs), 3)
+
+geneModuleMembership = as.data.frame(cor(datExpr, MEs, use = "p"))
+
+MMPvalue = as.data.frame(corPvalueStudent(as.matrix(geneModuleMembership), nSamples))
+names(geneModuleMembership) = paste("MM", modNames, sep="")
+names(MMPvalue) = paste("p.MM", modNames, sep="")
+
+sample_group$sample_group <- as.numeric(sample_group$sample_group)
+
+geneTraitSignificance = as.data.frame(cor(datExpr , sample_group, use = "p"));
+GSPvalue = as.data.frame(corPvalueStudent(as.matrix(geneTraitSignificance), nSamples));
+
+
+names(geneTraitSignificance) = paste("GS.", names(sample_group), sep="");
+names(GSPvalue) = paste("p.GS.", names(sample_group), sep="");
+
+module = "blue"
+column = match(module, modNames);
+moduleGenes = netcolors==module;
+sizeGrWindow(7, 7);
+par(mfrow = c(1,1));
+verboseScatterplot(abs(geneModuleMembership[moduleGenes, column]),
+                   abs(geneTraitSignificance[moduleGenes, 1]),
+                   xlab = paste("Module Membership in", module, "module"),
+                   ylab = "Gene significance for sample_group",
+                   main = paste("Module membership vs. Gene significance\n"),
+                   cex.main = 1.2, cex.lab = 1.2, cex.axis = 1.2, col = module)
+
+######Summary output of network analysis results 
+
+library(IlluminaHumanMethylationEPICanno.ilm10b4.hg19)
+annot = probe.genes;
+annot$Probe <- rownames(annot)
+dim(annot)
+names(annot)
+probes = colnames(datExpr)
+probes2annot = match(probes, annot$Probe)
+sum(is.na(probes2annot))
+
+
+geneInfo0 = data.frame(Probes = probes,
+                       geneSymbol = annot$gene[probes2annot],
+                       CHR = annot$CHR[probes2annot],
+                       feature = annot$feature[probes2annot],
+                       cgi = annot$cgi[probes2annot],
+                       moduleColor = netcolors,
+                       geneTraitSignificance,
+                       GSPvalue)
+
+###Ordering modules by their significance to sample_group 
+modOrder = order(-abs(cor(MEs, sample_group, use = "p")))
+
+# Add module membership information in the chosen order
+for (mod in 1:ncol(geneModuleMembership)){
+  oldNames = names(geneInfo0)
+  geneInfo0 = data.frame(geneInfo0, geneModuleMembership[, modOrder[mod]],
+                         MMPvalue[, modOrder[mod]]);
+  names(geneInfo0) = c(oldNames, paste("MM.", modNames[modOrder[mod]], sep=""),
+                       paste("p.MM.", modNames[modOrder[mod]], sep=""))
+}
+# Order the genes in the geneInfo variable first by module color, then by geneTraitSignificance
+geneOrder = order(geneInfo0$moduleColor, -abs(geneInfo0$GS.sample_group));
+geneInfo = geneInfo0[geneOrder, ]
+
+
+geneInfo_ERC <- geneInfo
+
+```
+
+
+```{r}
+Hubs <- chooseTopHubInEachModule(
+   datExpr, 
+   NetK$moduleColors, 
+   omitColors = "grey", 
+   power =12, 
+   type = "signed")
+
+Hubs
+
+geneInfo_Hubs <- subset(geneInfo_ERC, Probes%in%Hubs)
+geneInfo_Hubs_sig <- subset(geneInfo_Hubs, moduleColor%in%sigmods)
+```
+
+
+
+```{r Preparing for EWCE}
+#EWCE - cell enrichment 
+library(EWCE)
+library(ewceData)
+library(SingleCellExperiment)
+library(textshape)
+library(readxl)
+library(ggplot2)
+
+library(ewceData)
+
+# Load the single cell data
+ctd <- ewceData::ctd()
+
+
+#Getting the list of genes we used as input to WGCNA 
+background_genes <- as.data.frame(geneInfo$geneSymbol)
+colnames(background_genes)[1] <- paste("Name")
+
+
+bg <- background_genes$Name
+
+bg <- unlist(bg)
+
+```
+
+```{r}
+
+bg = geneInfo$geneSymbol
+modules <- unique(geneInfo$moduleColor)
+x_results_list <- list()
+x_results2 <- list()
+
+for(i in modules[1:length(unique(geneInfo$moduleColor))]){
+  print(i)
+  x <- subset(geneInfo, moduleColor == i)
+  x_genes <- x[,2]
+print(length(x_genes))
+ #Running the enrichment 
+  reps=1000
+  subCellStatus=TRUE 
+  x_results <- EWCE::bootstrap_enrichment_test(sct_data = ctd,
+                                                sctSpecies = "mouse",
+                                                genelistSpecies = "human",
+                                                hits = x_genes, 
+                                                reps = reps,
+                                                bg=bg,
+                                                annotLevel = 2)
+  x_results$results$Module <- paste(i)
+  x_results_list[[i]] <- x_results
+  x_results2[[i]] <- x_results$results
+  }
+
+EWCE <- do.call(rbind, x_results_list)
+EWCE_2 <- do.call(rbind, x_results2)
+
+
+
+EWCE_2$list = paste(EWCE_2$Module)
+
+
+EWCE_results <- EWCE_2
+EWCE_results$significant <- paste("Null")
+
+for(i in 1:nrow(EWCE_results)){
+  if(EWCE_results$q[i] < 0.05){
+    EWCE_results$significant[i] <- paste("Significant")
+  }
+  else if(EWCE_results$q[i] > 0.05){
+    EWCE_results$significant[i] <- paste("Not significant")
+  }
+}
+
+EWCE_results$SD <- EWCE_results$sd_from_mean
+for(i in 1:nrow(EWCE_results)){
+  if(EWCE_results$sd_from_mean[i] >0){
+    EWCE_results$SD[i] <- paste(EWCE_results$sd_from_mean[i])
+  }
+  else if(EWCE_results$sd_from_mean[i] < 0){
+    EWCE_results$SD[i] <- paste(0)
+  }
+}
+EWCE_results$SD <- as.numeric(EWCE_results$SD)
+
+ggplot(EWCE_results, aes(x=Module, y=CellType, color = significant, size = SD))+ theme_bw() +
+  geom_point()+ theme(axis.text.x = element_text(angle=45, hjust=1))+ scale_color_manual(values = c("Significant" = "midnightblue","Not significant"="lightblue"))
+
+```
+
+
+```{r}
+library(stringr)
+moduleTraitPvalueK <- as.data.frame(moduleTraitPvalueK)
+sigmods <- subset(moduleTraitPvalueK, Sample_Group< (0.05/23))
+sigmods <- rownames(sigmods)
+sigmods <- str_remove_all(sigmods, "ME")
+
+```
+
+
+```{r}
+
+load("Z:/Sao_for_Preservation/PSPnetworks/annot.RData")
+MyelinGenesFullratios <- read_excel("Z:/EWAS_OligodendrocyteSignaturesFTLD/MyelinGenesFullratios.xlsx")
+#3 fold and BH 0 - discussed with Sao 
+MyelinGenes <- MyelinGenesFullratios
+#MyelinGenes <- subset(MyelinGenes, BH == "0")
+#MyelinGenes <- subset(MyelinGenes, Ratio > 3)
+
+OLG_genes <- subset(MyelinGenes, Enrichment == "Oli" )
+OLG_genes <- as.vector(OLG_genes$hgnc_symbol)
+
+OPC_genes <- subset(MyelinGenes, Enrichment == "Opc" )
+OPC_genes <- as.vector(OPC_genes$hgnc_symbol)
+
+OLG_probes <- subset(annot, gene%in%OLG_genes)
+OLG_probes <- OLG_probes$Probe
+
+OPC_probes <- subset(annot, gene%in%OPC_genes)
+OPC_probes <- OPC_probes$Probe
+#Subsetting geneInfo for those that are 'myelin' genes 
+OLG_probesERC <- intersect(OLG_probes,geneInfo_ERC$Probes)
+OPC_probesERC <- intersect(OPC_probes, geneInfo_ERC$Probes)
+
+ # Fisher's test checking for enrichment of Oligodendrocyte genes 
+
+modules <- unique(geneInfo_ERC$moduleColor)
+test_results_list <- list()
+
+
+for(i in modules[1:23]){
+  print(i)
+  module_ERC <- (subset(geneInfo_ERC, moduleColor == i))
+  module_probes <- module_ERC[,1]
+
+ #Getting the numbers 
+x = length(intersect(OPC_probesERC, module_probes))
+y = (length(OPC_probesERC)- length(intersect(OPC_probesERC, module_probes)))
+z =  (length(module_probes)-length(intersect(OPC_probesERC, module_probes)))
+p = 45290 - (x+y+z)
+
+dat_module <- data.frame("OPC" = c(x, y), "Not_OPC" = c(z,p), row.names = c("Module", "Not_Module"), stringsAsFactors = FALSE)
+
+    
+test_module <- fisher.test(dat_module)
+  test_p_val <- test_module$p.value
+  test_confupper <- test_module$conf.int[2]
+  test_conflower <- test_module$conf.int[1]
+  test_or <- test_module$estimate
+  test_module <- paste(i)
+  test_df <- cbind(test_p_val,test_conflower, test_confupper, test_or, test_module)
+  
+  test_results_list[[i]] <- test_df
+  
+}
+
+allMods_ERCmanualOPC <- as.data.frame(do.call(rbind, test_results_list))
+
+ # Fisher's test checking for enrichment of Oligodendrocyte genes 
+
+modules <- unique(geneInfo_ERC$moduleColor)
+test_results_list <- list()
+
+
+for(i in modules[1:23]){
+  print(i)
+  module_ERC <- (subset(geneInfo_ERC, moduleColor == i))
+  module_probes <- module_ERC[,1]
+
+ #Getting the numbers 
+x = length(intersect(OLG_probesERC, module_probes))
+y = (length(OLG_probesERC)- length(intersect(OLG_probesERC, module_probes)))
+z =  (length(module_probes)-length(intersect(OLG_probesERC, module_probes)))
+p =45290 - (x+y+z)
+
+dat_module <- data.frame("OLG" = c(x, y), "Not_OLG" = c(z,p), row.names = c("Module", "Not_Module"), stringsAsFactors = FALSE)
+
+    
+test_module <- fisher.test(dat_module)
+  test_p_val <- test_module$p.value
+  test_confupper <- test_module$conf.int[2]
+  test_conflower <- test_module$conf.int[1]
+  test_or <- test_module$estimate
+  test_module <- paste(i)
+  test_df <- cbind(test_p_val,test_conflower, test_confupper, test_or, test_module)
+  
+  test_results_list[[i]] <- test_df
+  
+}
+
+allMods_ERCmanualOLG <- as.data.frame(do.call(rbind, test_results_list))
+```
+
+```{r Forest Plot ERC significant modules}
+
+ERC_OLG_Test <- subset(allMods_ERCmanualOLG, test_module%in%sigmods)
+ERC_OLG_Test$test_p_val <- as.numeric(ERC_OLG_Test$test_p_val)
+ERC_OLG_Test$test_conflower <- as.numeric(ERC_OLG_Test$test_conflower)
+ERC_OLG_Test$test_confupper <- as.numeric(ERC_OLG_Test$test_confupper)
+ERC_OLG_Test$test_or <- as.numeric(ERC_OLG_Test$test_or)
+
+
+colors_ERC<- ERC_OLG_Test$test_module
+ERC_OLG_Test$Significant <- paste("Not")
+for(i in 1:nrow(ERC_OLG_Test)){
+  print(i)
+  if(ERC_OLG_Test$test_p_val[i] <0.05){
+    ERC_OLG_Test$Significant[i] <- paste("Significant")
+  }
+}
+
+ERC_OLG_Enrichment_sig <- ggplot(data = ERC_OLG_Test, aes(y=reorder(test_module, test_or), x= test_or, xmin=test_conflower, xmax=test_confupper)) + geom_pointrange(aes(fill=test_module, shape = Significant), size=1.6, show.legend = FALSE) + scale_colour_manual(values = ERC_OLG_Test$test_module) + xlab("Odds Ratio (95% CI)") + ylab("Modules")+ scale_fill_manual(values = ERC_OLG_Test$test_module)+
+  theme_bw() + 
+  geom_vline(xintercept = 1, linetype="dashed", 
+                color = "black") + ggtitle("OLG Enrichment") + scale_shape_manual(values=c(21,22))
+
+
+ERC_OPC_Test <- subset(allMods_ERCmanualOPC, test_module%in%sigmods)
+ERC_OPC_Test$test_p_val <- as.numeric(ERC_OPC_Test$test_p_val)
+ERC_OPC_Test$test_conflower <- as.numeric(ERC_OPC_Test$test_conflower)
+ERC_OPC_Test$test_confupper <- as.numeric(ERC_OPC_Test$test_confupper)
+ERC_OPC_Test$test_or <- as.numeric(ERC_OPC_Test$test_or)
+
+
+
+colors_ERC<- ERC_OPC_Test$test_module
+ERC_OPC_Test$Significant <- paste("Not")
+for(i in 1:nrow(ERC_OPC_Test)){
+  print(i)
+  if(ERC_OPC_Test$test_p_val[i] <0.05){
+    ERC_OPC_Test$Significant[i] <- paste("Significant")
+  }
+}
+
+ERC_OPC_Enrichment_sig <- ggplot(data = ERC_OPC_Test, aes(y=reorder(test_module, test_or), x= test_or, xmin=test_conflower, xmax=test_confupper)) + geom_pointrange(aes(fill=test_module, shape = Significant), size=1.6, show.legend = FALSE) + scale_colour_manual(values = ERC_OPC_Test$test_module) + xlab("Odds Ratio (95% CI)") + ylab("Modules")+ scale_fill_manual(values = ERC_OPC_Test$test_module)+
+  theme_bw() + 
+  geom_vline(xintercept = 1, linetype="dashed", 
+                color = "black") + ggtitle("OPC Enrichment") + scale_shape_manual(values=c(21,22))
+
+
+
+cowplot::plot_grid(ERC_OPC_Enrichment_sig, ERC_OLG_Enrichment_sig, ncol=2, labels=c("OPC Enrichment in FTLD associated Modules", "OLG Enrichment in FTLD associated Modules"))
+
+
+#~~~ all modules 
+ERC_OLG_Test <- allMods_ERCmanualOLG
+ERC_OLG_Test$test_p_val <- as.numeric(ERC_OLG_Test$test_p_val)
+ERC_OLG_Test$test_conflower <- as.numeric(ERC_OLG_Test$test_conflower)
+ERC_OLG_Test$test_confupper <- as.numeric(ERC_OLG_Test$test_confupper)
+ERC_OLG_Test$test_or <- as.numeric(ERC_OLG_Test$test_or)
+
+
+colors_ERC<- ERC_OLG_Test$test_module
+ERC_OLG_Test$Significant <- paste("Not")
+for(i in 1:nrow(ERC_OLG_Test)){
+  print(i)
+  if(ERC_OLG_Test$test_p_val[i] <0.05){
+    ERC_OLG_Test$Significant[i] <- paste("Significant")
+  }
+}
+
+ERC_OLG_Enrichment <- ggplot(data = ERC_OLG_Test, aes(y=reorder(test_module, test_or), x= test_or, xmin=test_conflower, xmax=test_confupper)) + geom_pointrange(aes(fill=test_module, shape = Significant), size=1.6, show.legend = FALSE) + scale_colour_manual(values = ERC_OLG_Test$test_module) + xlab("Odds Ratio (95% CI)") + ylab("Modules")+ scale_fill_manual(values = ERC_OLG_Test$test_module)+
+  theme_bw() + 
+  geom_vline(xintercept = 1, linetype="dashed", 
+                color = "black") + ggtitle("OLG Enrichment") + scale_shape_manual(values=c(21,22))
+
+ERC_OPC_Test <- allMods_ERCmanualOPC
+ERC_OPC_Test$test_p_val <- as.numeric(ERC_OPC_Test$test_p_val)
+ERC_OPC_Test$test_conflower <- as.numeric(ERC_OPC_Test$test_conflower)
+ERC_OPC_Test$test_confupper <- as.numeric(ERC_OPC_Test$test_confupper)
+ERC_OPC_Test$test_or <- as.numeric(ERC_OPC_Test$test_or)
+
+
+
+colors_ERC<- ERC_OPC_Test$test_module
+ERC_OPC_Test$Significant <- paste("Not")
+for(i in 1:nrow(ERC_OPC_Test)){
+  print(i)
+  if(ERC_OPC_Test$test_p_val[i] <0.05){
+    ERC_OPC_Test$Significant[i] <- paste("Significant")
+  }
+}
+
+ERC_OPC_Enrichment <- ggplot(data = ERC_OPC_Test, aes(y=reorder(test_module, test_or), x= test_or, xmin=test_conflower, xmax=test_confupper)) + geom_pointrange(aes(fill=test_module, shape = Significant), size=1.6, show.legend = FALSE) + scale_colour_manual(values = ERC_OPC_Test$test_module) + xlab("Odds Ratio (95% CI)") + ylab("Modules")+ scale_fill_manual(values = ERC_OPC_Test$test_module)+
+  theme_bw() + 
+  geom_vline(xintercept = 1, linetype="dashed", 
+                color = "black") + ggtitle("OPC Enrichment") + scale_shape_manual(values=c(21,22))
+
+
+cowplot::plot_grid(ERC_OPC_Enrichment_sig, ERC_OLG_Enrichment_sig, ncol=2 )
+cowplot::plot_grid(ERC_OPC_Enrichment, ERC_OLG_Enrichment, ncol=2 )
+```
+
+
+
