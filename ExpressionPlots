@@ -1,0 +1,469 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
+
+Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Cmd+Shift+Enter*. 
+
+```{r}
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+library(forcats)
+
+# Add regulation status and filter by adjusted p-value
+deg_all_complete <- deg_all_complete %>%
+  filter(p_val_adj < 0.05) %>%
+  mutate(Regulation = ifelse(avg_log2FC > 0, "Upregulated", "Downregulated"))
+
+# Function to extract significant gene counts for each module and region
+get_gene_counts <- function(module_genes, region_label) {
+  deg_all_complete %>%
+    filter(gene %in% module_genes) %>%
+    count(Subcluster, Regulation) %>%
+    mutate(Region = region_label)
+}
+
+# Apply for each region
+dlpfc_counts  <- get_gene_counts(dlpfc_modgenes, "DLPFC-greenyellow")
+erc_counts    <- get_gene_counts(erc_modgenes,   "ERC-tan")
+hippo_counts  <- get_gene_counts(hippo_modgenes, "HIPPO-grey60")
+
+# Combine all into one dataframe
+plot_df <- bind_rows(dlpfc_counts, erc_counts, hippo_counts)
+
+# Convert downregulated counts to negative for mirrored bars
+plot_df <- plot_df %>%
+  mutate(GeneCount = ifelse(Regulation == "Downregulated", -n, n))
+
+# Plot
+ggplot(plot_df, aes(x = GeneCount, y = fct_rev(Subcluster), fill = Regulation)) +
+  geom_col(width = 0.8) +
+  facet_wrap(~Region, nrow = 1) +
+  scale_fill_manual(values = c("Upregulated" = "firebrick", "Downregulated" = "steelblue")) +
+  theme_minimal(base_size = 14) +
+  labs(x = "Gene count (Up/Down)", y = "Subcluster", fill = NULL)
+
+
+
+subclusters <- unique(olg_AD@meta.data$Subcluster)
+
+all_de_results <- list()
+
+for (sub in subclusters) {
+  # Subset to one subcluster
+  sub_obj <- subset(olg_AD, subset = Subcluster == sub & pathology.group %in% c("no-pathology", "early-pathology", "late-pathology"))
+  
+  # Early vs Control
+  sub_early <- subset(sub_obj, subset = pathology.group %in% c("no-pathology", "early-pathology"))
+  sub_early$comparison <- factor(sub_early$pathology.group, levels = c("no-pathology", "early-pathology"))
+  Idents(sub_early) <- "comparison"
+  de_early <- FindMarkers(sub_early, ident.1 = "early-pathology", ident.2 = "no-pathology", logfc.threshold = 0.1)
+  de_early$comparison <- "early"
+  de_early$subcluster <- sub
+  de_early$gene <- rownames(de_early)
+  
+  # Late vs Control
+  sub_late <- subset(sub_obj, subset = pathology.group %in% c("no-pathology", "late-pathology"))
+  sub_late$comparison <- factor(sub_late$pathology.group, levels = c("no-pathology", "late-pathology"))
+  Idents(sub_late) <- "comparison"
+  de_late <- FindMarkers(sub_late, ident.1 = "late-pathology", ident.2 = "no-pathology", logfc.threshold = 0.1)
+  de_late$comparison <- "late"
+  de_late$subcluster <- sub
+  de_late$gene <- rownames(de_late)
+  
+  # Combine
+  all_de_results[[sub]] <- rbind(de_early, de_late)
+}
+
+# Combine all into one dataframe
+deg_by_sub <- do.call(rbind, all_de_results)
+
+
+```
+
+```{r}
+library(dplyr)
+
+# Add Upregulated / Downregulated label
+deg_counts_df <- deg_by_sub %>%
+  filter(p_val_adj < 0.05, gene %in% c(dlpfc_modgenes, erc_modgenes, hippo_modgenes)) %>%
+  mutate(Regulation = ifelse(avg_log2FC > 0, "Upregulated", "Downregulated")) %>%
+  # Join with module labels
+  left_join(data.frame(
+    gene = c(dlpfc_modgenes, erc_modgenes, hippo_modgenes),
+    Module = c(rep("DLPFC-greenyellow", length(dlpfc_modgenes)),
+               rep("ERC-tan", length(erc_modgenes)),
+               rep("HIPPO-grey60", length(hippo_modgenes)))
+  ), by = "gene") %>%
+  group_by(Module, subcluster, comparison, Regulation) %>%
+  summarise(GeneCount = n(), .groups = "drop")
+library(ggplot2)
+library(forcats)
+
+# Convert comparison to label
+deg_counts_df$comparison <- recode(deg_counts_df$comparison,
+                                   "early" = "Early pathology", "late" = "Late pathology")
+
+# Set factor levels for facet order
+deg_counts_df$Module <- factor(deg_counts_df$Module,
+                               levels = c("DLPFC-greenyellow", "ERC-tan", "HIPPO-grey60"))
+
+ggplot(deg_counts_df, aes(x = GeneCount * ifelse(Regulation == "Downregulated", -1, 1),
+                          y = fct_rev(subcluster),
+                          fill = Regulation)) +
+  geom_col(width = 0.8) +
+  facet_wrap(~Module + comparison, nrow = 1) +
+  scale_fill_manual(values = c("Upregulated" = "firebrick", "Downregulated" = "steelblue")) +
+  theme_minimal(base_size = 14) +
+  labs(x = "Gene count (Up/Down)", y = "Subcluster", fill = NULL,
+       title = "Number of Significant Module Genes by Pathology Stage and Subcluster")
+
+```
+```{r}
+library(dplyr)
+
+# Combine module and pathology info
+deg_counts_stacked <- deg_by_sub %>%
+  filter(p_val_adj < 0.05,
+         gene %in% c(dlpfc_modgenes, erc_modgenes, hippo_modgenes)) %>%
+  mutate(Regulation = ifelse(avg_log2FC > 0, "Upregulated", "Downregulated")) %>%
+  left_join(data.frame(
+    gene = c(dlpfc_modgenes, erc_modgenes, hippo_modgenes),
+    Module = c(rep("DLPFC-greenyellow", length(dlpfc_modgenes)),
+               rep("ERC-tan", length(erc_modgenes)),
+               rep("HIPPO-grey60", length(hippo_modgenes)))
+  ), by = "gene") %>%
+  group_by(Module, subcluster, comparison, Regulation) %>%
+  summarise(GeneCount = n(), .groups = "drop")
+
+deg_counts_stacked <- deg_counts_stacked %>%
+  mutate(RegulationStage = paste(Regulation, comparison, sep = "_"))
+fill_colors <- c(
+  "Upregulated_early" = "#e41a1c",
+  "Upregulated_late" = "#fb8072",
+  "Downregulated_early" = "#377eb8",
+  "Downregulated_late" = "#9ecae1"
+)
+library(ggplot2)
+library(forcats)
+
+ggplot(deg_counts_stacked, aes(
+  x = GeneCount * ifelse(grepl("Downregulated", RegulationStage), -1, 1),
+  y = fct_rev(subcluster),
+  fill = RegulationStage
+)) +
+  geom_col(width = 0.8) +
+  facet_wrap(~Module, nrow = 1) +
+  scale_fill_manual(values = fill_colors) +
+  theme_minimal(base_size = 14) +
+  labs(
+    x = "Gene count (Up/Down)",
+    y = "Subcluster",
+    fill = "Regulation & Stage",
+    title = "Module DEG Counts by Subcluster (Early vs Late Pathology)"
+  )
+
+```
+```{r}
+# Combine module membership info
+module_df <- data.frame(
+  gene = c(dlpfc_modgenes, erc_modgenes, hippo_modgenes),
+  module = c(rep("DLPFC-greenyellow", length(dlpfc_modgenes)),
+             rep("ERC-tan", length(erc_modgenes)),
+             rep("HIPPO-grey60", length(hippo_modgenes)))
+)
+
+# Filter for Oli3, both early and late
+deg_oli3 <- deg_by_sub %>%
+  filter(subcluster == "Oli3") %>%
+  left_join(module_df, by = "gene") %>%
+  mutate(module = ifelse(is.na(module), "Not in methylation modules", module))
+
+library(ggplot2)
+
+deg_oli3_early <- deg_oli3 %>%
+  filter(comparison == "early") %>%
+  mutate(
+    sig = ifelse(p_val_adj < 0.05 & abs(avg_log2FC) > 0.25, "Significant", "Not sig")
+  )
+
+ggplot(deg_oli3_early, aes(x = avg_log2FC, y = -log10(p_val_adj))) +
+  geom_point(aes(color = module, alpha = sig), size = 2) +
+  scale_color_manual(values = c(
+    "DLPFC-greenyellow" = "#1b9e77",
+    "ERC-tan" = "#d95f02",
+    "HIPPO-grey60" = "#7570b3",
+    "Not in methylation modules" = "grey80"
+  )) +
+  scale_alpha_manual(values = c("Significant" = 1, "Not sig" = 0.2)) +
+  geom_vline(xintercept = c(-0.25, 0.25), linetype = "dashed") +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed") +
+  theme_minimal(base_size = 13) +
+  labs(
+    x = "Log2 Fold Change (Early pathology vs control)",
+    y = "-log10 Adjusted P-value",
+    color = "Module Membership",
+    alpha = "Significance",
+    title = "Volcano Plot: DEGs in Oli3 Highlighting Methylation Modules"
+  )
+
+```
+```{r}
+# First, combine into a list of unique module memberships per gene
+module_df <- data.frame(
+  gene = c(dlpfc_modgenes, erc_modgenes, hippo_modgenes),
+  module = c(rep("DLPFC-greenyellow", length(dlpfc_modgenes)),
+             rep("ERC-tan", length(erc_modgenes)),
+             rep("HIPPO-grey60", length(hippo_modgenes)))
+)
+
+# Collapse multiple memberships into one row per gene
+library(dplyr)
+
+module_combined <- module_df %>%
+  group_by(gene) %>%
+  summarise(module_label = paste(sort(unique(module)), collapse = " & "))
+
+# Now join this to your DEG table
+deg_oli3 <- deg_by_sub %>%
+  filter(subcluster == "Oli3") %>%
+  left_join(module_combined, by = "gene") %>%
+  mutate(module_label = ifelse(is.na(module_label), "Not in methylation modules", module_label))
+
+ggplot(
+  deg_oli3 %>% filter(comparison == "early") %>%
+    mutate(sig = ifelse(p_val_adj < 0.05 & abs(avg_log2FC) > 0.25, "Significant", "Not sig")),
+  aes(x = avg_log2FC, y = -log10(p_val_adj))
+) +
+  geom_point(aes(color = module_label, alpha = sig), size = 2) +
+  scale_alpha_manual(values = c("Significant" = 1, "Not sig" = 0.2)) +
+  geom_vline(xintercept = c(-0.25, 0.25), linetype = "dashed") +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed") +
+  theme_minimal(base_size = 13) +
+  labs(
+    x = "Log2 Fold Change (Early pathology vs control)",
+    y = "-log10 Adjusted P-value",
+    color = "Module Membership",
+    title = "Volcano Plot of Oli3 DEGs with Methylation Module Labels"
+  )
+
+```
+
+```{r}
+# Combine module gene lists
+module_df <- data.frame(
+  gene = c(dlpfc_modgenes, erc_modgenes, hippo_modgenes),
+  module = c(rep("DLPFC-greenyellow", length(dlpfc_modgenes)),
+             rep("ERC-tan", length(erc_modgenes)),
+             rep("HIPPO-grey60", length(hippo_modgenes)))
+)
+
+# Collapse multi-module membership
+library(dplyr)
+module_combined <- module_df %>%
+  group_by(gene) %>%
+  summarise(module_label = paste(sort(unique(module)), collapse = " & "), .groups = "drop")
+
+# Add gene column if needed
+deg_all_complete$gene <- rownames(deg_all_complete)
+
+# Filter for Oli3
+deg_oli3_all <- deg_all_complete %>%
+  filter(Subcluster == "Oli3") %>%
+  left_join(module_combined, by = "gene") %>%
+  mutate(
+    module_label = ifelse(is.na(module_label), "Not in module", module_label),
+    sig = ifelse(p_val_adj < 0.05 & abs(avg_log2FC) > 0.25, "Significant", "Not sig")
+  )
+
+module_colors <- c(
+  "DLPFC-greenyellow" = "#1b9e77",
+  "ERC-tan" = "#d95f02",
+  "HIPPO-grey60" = "#7570b3",
+  "DLPFC-greenyellow & ERC-tan" = "#e7298a",
+  "DLPFC-greenyellow & HIPPO-grey60" = "#66a61e",
+  "ERC-tan & HIPPO-grey60" = "#e6ab02",
+  "DLPFC-greenyellow & ERC-tan & HIPPO-grey60" = "#a6761d",
+  "Not in module" = "lightgrey"
+)
+
+library(ggrepel)
+
+top_labels <- deg_oli3_all %>%
+  filter(p_val_adj < 0.01, module_label != "Not in module") %>%
+  arrange(p_val_adj) %>%
+  slice_head(n = 15)
+
+library(ggplot2)
+
+ggplot(deg_oli3_all, aes(x = avg_log2FC, y = -log10(p_val_adj))) +
+  geom_point(aes(color = module_label, alpha = sig), size = 2) +
+  scale_color_manual(values = module_colors) +
+  scale_alpha_manual(values = c("Significant" = 1, "Not sig" = 0.2)) +
+  geom_text_repel(
+  data = top_labels,
+  aes(label = paste0("italic(", gene, ")")),
+  size = 4,
+  parse = TRUE,           # ← enables italic formatting
+  max.overlaps = 100
+) +
+  geom_vline(xintercept = c(-0.25, 0.25), linetype = "dashed") +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed") +
+  theme_minimal(base_size = 13) +
+  labs(
+    x = "Log2 Fold Change (Oli3)",
+    y = "-log10 Adjusted P-value",
+    color = "Module Membership",
+    alpha = "Significance",
+    title = "DEGs in Oli3 with Co-Methylation Module Labels"
+  )
+
+```
+```{r}
+library(dplyr)
+
+library(stringr)
+library(dplyr)
+
+# Clean DEG table
+deg_all_complete <- deg_all_complete %>%
+  mutate(gene = str_remove(as.character(gene), "\\.\\.\\..*$") %>% toupper())
+
+# Clean module genes
+dlpfc_modgenes <- str_remove(toupper(dlpfc_modgenes), "\\.\\.\\..*$")
+erc_modgenes   <- str_remove(toupper(erc_modgenes), "\\.\\.\\..*$")
+hippo_modgenes <- str_remove(toupper(hippo_modgenes), "\\.\\.\\..*$")
+
+# Build module info dataframe
+module_df <- data.frame(
+  gene = c(dlpfc_modgenes, erc_modgenes, hippo_modgenes),
+  module = c(rep("DLPFC-greenyellow", length(dlpfc_modgenes)),
+             rep("ERC-tan", length(erc_modgenes)),
+             rep("HIPPO-grey60", length(hippo_modgenes)))
+)
+
+module_combined <- module_df %>%
+  group_by(gene) %>%
+  summarise(module_label = paste(sort(unique(module)), collapse = " & "), .groups = "drop")
+# Filter for selected clusters
+deg_faceted <- deg_all_complete %>%
+  filter(Subcluster %in% c("Oli0", "Oli1", "Oli3")) %>%
+  mutate(gene = rownames(.)) %>%
+  left_join(module_combined, by = "gene") %>%
+  mutate(
+    module_label = ifelse(is.na(module_label), "Not in module", module_label),
+    sig = ifelse(p_val_adj < 0.05 & abs(avg_log2FC) > 0.25, "Significant", "Not sig")
+  )
+
+
+# Clean up deg_all_complete$gene
+deg_faceted <- deg_faceted %>%
+  mutate(gene = str_remove(gene, "\\.\\.\\..*$"))
+
+# Merge co-methylation module info
+
+library(ggrepel)
+
+top_labels <- deg_faceted %>%
+  filter(p_val_adj < 0.01, module_label != "Not in module") %>%
+  group_by(Subcluster) %>%
+  arrange(p_val_adj) %>%
+  slice_head(n = 10) %>%
+  ungroup() %>%
+  mutate(label = paste0("italic(", gene, ")"))
+
+
+module_colors <- c(
+  "DLPFC-greenyellow" = "#1b9e77",
+  "ERC-tan" = "#d95f02",
+  "HIPPO-grey60" = "#7570b3",
+  "DLPFC-greenyellow & ERC-tan" = "#e7298a",
+  "DLPFC-greenyellow & HIPPO-grey60" = "#66a61e",
+  "ERC-tan & HIPPO-grey60" = "#e6ab02",
+  "DLPFC-greenyellow & ERC-tan & HIPPO-grey60" = "#a6761d",
+  "Not in module" = "lightgrey"
+)
+
+library(ggplot2)
+
+library(stringr)
+
+
+ggplot(deg_faceted, aes(x = avg_log2FC, y = -log10(p_val_adj))) +
+  geom_point(aes(color = module_label, alpha = sig), size = 1.5) +
+  scale_color_manual(values = module_colors) +
+  scale_alpha_manual(values = c("Significant" = 1, "Not sig" = 0.2)) +
+  geom_text_repel(
+    data = top_labels,
+    aes(label = label),
+    parse = TRUE,
+    size = 3,
+    max.overlaps = 100
+  ) +
+  geom_vline(xintercept = c(-0.25, 0.25), linetype = "dashed") +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed") +
+  facet_wrap(~Subcluster, ncol = 3, scales = "free") +
+  theme_minimal(base_size = 13) +
+  labs(
+    x = "Log2 Fold Change",
+    y = "-log10 Adjusted P-value",
+    color = "Module Membership",
+    alpha = "Significance",
+    title = "DEGs in OLG Subclusters"
+  )
+
+```
+```{r}
+library(ggrepel)
+
+top_labels <- deg_faceted %>%
+  filter(p_val_adj < 0.01, module_label != "Not in module") %>%
+  group_by(Subcluster) %>%
+  arrange(p_val_adj) %>%
+  slice_head(n = 10) %>%
+  ungroup() %>%
+  mutate(label = paste0("italic(", gene, ")"))
+
+module_colors <- c(
+  "DLPFC-greenyellow" = "#1b9e77",
+  "ERC-tan" = "#d95f02",
+  "HIPPO-grey60" = "#7570b3",
+  "DLPFC-greenyellow & ERC-tan" = "#e7298a",
+  "DLPFC-greenyellow & HIPPO-grey60" = "#66a61e",
+  "ERC-tan & HIPPO-grey60" = "#e6ab02",
+  "DLPFC-greenyellow & ERC-tan & HIPPO-grey60" = "#a6761d",
+  "Not in module" = "lightgrey"
+)
+
+library(ggplot2)
+
+ggplot(deg_faceted, aes(x = avg_log2FC, y = -log10(p_val_adj))) +
+  geom_point(aes(color = module_label, alpha = sig), size = 1.5) +
+  geom_text_repel(
+    data = top_labels,
+    aes(label = label),
+    parse = TRUE,
+    size = 3.5,
+    max.overlaps = 100
+  ) +
+  geom_vline(xintercept = c(-0.25, 0.25), linetype = "dashed") +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed") +
+  facet_wrap(~Subcluster, ncol = 3, scales = "free") +
+  scale_color_manual(values = module_colors) +
+  scale_alpha_manual(values = c("Significant" = 1, "Not sig" = 0.2)) +
+  theme_minimal(base_size = 13) +
+  labs(
+    x = "Log2 Fold Change",
+    y = "-log10 Adjusted P-value",
+    color = "Module Membership",
+    alpha = "Significance",
+    title = "Faceted Volcano Plot of DEGs by Subcluster with Co-Methylation Module Labels"
+  )
+
+hd_blue <- subset(hd_mm_assigned, hd_module == "blue")
+hd_turquoise <- subset(hd_mm_assigned, hd_module == "turquoise")
+
+```
