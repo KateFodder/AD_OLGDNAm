@@ -7,13 +7,13 @@ library(Seurat)
 library(Matrix)
 
 # Step 1: Load count matrix
-counts <- readMM("//rdp.arc.ucl.ac.uk/ritd-ag-project-rd01b9-mdcfe39/scRNAseqAD/Filtered/matrix.mtx.gz")
+counts <- readMM("countsfile")
 
 # Step 2: Load gene names
-genes <- readLines("//rdp.arc.ucl.ac.uk/ritd-ag-project-rd01b9-mdcfe39/scRNAseqAD/Filtered/features.tsv.gz")
+genes <- readLines("genesfile")
 
 # Step 3: Load barcodes
-barcodes <- read.delim("//rdp.arc.ucl.ac.uk/ritd-ag-project-rd01b9-mdcfe39/scRNAseqAD/Filtered/barcodes.tsv.gz", header = TRUE) 
+barcodes <- read.delim("barcodesfile", header = TRUE) 
 
 rownames(counts) <- genes
 colnames(counts) <- barcodes$TAG
@@ -229,6 +229,7 @@ alldatasets_OLG <- intersect(bothdatasets_OLG, admeta_GLIA_OLG$gene)
 ```{r}
 comparisons <- as.list(c("OLGs_1_Pathology","OLGs_1_No-Pathology"),c("OLGs_2_Pathology","OLGs_2_No-Pathology"),c("OLGs_3_Pathology","OLGs_3_No-Pathology"),c("OLGs_4_Pathology","OLGs_4_No-Pathology"),c("OPC_Pathology","OPC_No-Pathology"))
 ```
+
 
 
 
